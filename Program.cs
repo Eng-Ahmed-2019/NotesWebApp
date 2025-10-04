@@ -1,6 +1,7 @@
 using System.Text;
 using NotesJwtApi.Data;
 using NotesJwtApi.Models;
+using NotesJwtApi.Middleware;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.IdentityModel.Tokens;
@@ -78,6 +79,7 @@ builder.Services.AddSwaggerGen(c =>
 });
 
 var app = builder.Build();
+app.UseMiddleware<TokenRevocationMiddleware>();
 if (app.Environment.IsDevelopment())
 {
     app.UseSwagger();

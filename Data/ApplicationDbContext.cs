@@ -10,5 +10,7 @@ namespace NotesJwtApi.Data
             : base(options) { }
 
         public DbSet<Note> Notes { get; set; }
+        public DbSet<RefreshToken> RefreshTokens { get; set; }
+        public DbSet<RevokedToken> RevokedTokens { get; set; }
     }
 }

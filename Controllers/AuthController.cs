@@ -1,10 +1,13 @@
 ﻿using System.Text;
+using NotesJwtApi.Data;
 using NotesJwtApi.Models;
 using System.Security.Claims;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.IdentityModel.Tokens;
 using System.IdentityModel.Tokens.Jwt;
+using Microsoft.AspNetCore.Authorization;
 
 namespace NotesJwtApi.Controllers
 {
@@ -13,14 +16,16 @@ namespace NotesJwtApi.Controllers
     public class AuthController : ControllerBase
     {
         private readonly IConfiguration _configuration;
+        private readonly ApplicationDbContext _context;
         private readonly UserManager<ApplicationUser> _userManager;
         private readonly SignInManager<ApplicationUser> _signInManager;
 
         public AuthController(
             UserManager<ApplicationUser> userManager,
             SignInManager<ApplicationUser> signInManager,
-            IConfiguration configuration)
+            IConfiguration configuration, ApplicationDbContext context)
         {
+            _context = context;
             _userManager = userManager;
             _signInManager = signInManager;
             _configuration = configuration;
@@ -51,8 +56,106 @@ namespace NotesJwtApi.Controllers
             var check = await _signInManager.CheckPasswordSignInAsync(user, model.Password, false);
             if (!check.Succeeded) return Unauthorized(new { message = "Invalid credentials" });
 
-            var token = GenerateJwtToken(user);
-            return Ok(new { token });
+            var accessToken = GenerateJwtToken(user);
+            var refreshToken = GenerateRefreshToken();
+
+            var rt = new RefreshToken
+            {
+                Token = refreshToken,
+                UserId = user.Id,
+                Expires = DateTime.UtcNow.AddDays(7)
+            };
+
+            _context.RefreshTokens.Add(rt);
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                accessToken,
+                refreshToken
+            });
+        }
+
+        [HttpPost("refresh")]
+        public async Task<IActionResult> Refresh([FromBody] string refreshToken)
+        {
+            var storedToken = await _context.RefreshTokens
+                .FirstOrDefaultAsync(t => t.Token == refreshToken);
+
+            if (storedToken == null || !storedToken.isActive)
+                return Unauthorized(new { message = "Invalid refresh token" });
+
+            var user = await _userManager.FindByIdAsync(storedToken.UserId);
+            if (user == null) return Unauthorized();
+
+            storedToken.Revoked = DateTime.UtcNow;
+
+            var newRefreshToken = GenerateRefreshToken();
+
+            var rt = new RefreshToken
+            {
+                Token = newRefreshToken,
+                UserId = user.Id,
+                Expires = DateTime.UtcNow.AddDays(7)
+            };
+
+            _context.RefreshTokens.Add(rt);
+
+            var accessToken = GenerateJwtToken(user);
+
+            await _context.SaveChangesAsync();
+
+            return Ok(new
+            {
+                accessToken,
+                refreshToken = newRefreshToken
+            });
+        }
+
+        [HttpPost("logout")]
+        [Authorize]
+        public async Task<IActionResult> Logout([FromBody] string refreshToken)
+        {
+            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            var storedToken = await _context.RefreshTokens
+                .FirstOrDefaultAsync(t => t.Token == refreshToken && t.UserId == userId);
+
+            if (storedToken == null)
+                return NotFound(new { message = "Refresh token not found" });
+
+            storedToken.Revoked = DateTime.UtcNow;
+
+            await _context.SaveChangesAsync();
+
+            return Ok(new { message = "Logged out successfully" });
+        }
+
+        [HttpPost("logoutall")]
+        [Authorize]
+        public async Task<IActionResult> LogoutAllSession()
+        {
+            var userId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            var userTokens = await _context.RefreshTokens
+                .Where(t => t.UserId == userId && t.Revoked == null && t.Expires > DateTime.UtcNow)
+                .ToListAsync();
+
+            foreach (var token in userTokens)
+                token.Revoked = DateTime.UtcNow;
+
+            var currentAccessToken = HttpContext.Request.Headers["Authorization"]
+                .ToString().Replace("Bearer ", "");
+
+            _context.RevokedTokens.Add(new RevokedToken
+            {
+                Token = currentAccessToken,
+                RevokedAt = DateTime.UtcNow
+            });
+
+            await _context.SaveChangesAsync();
+
+            return Ok(new { message = "Logged out successfully. All tokens revoked." });
         }
 
         private string GenerateJwtToken(ApplicationUser user)
@@ -81,6 +184,14 @@ namespace NotesJwtApi.Controllers
             );
 
             return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+
+        private string GenerateRefreshToken()
+        {
+            var randomNumber = new byte[32];
+            using var rng = System.Security.Cryptography.RandomNumberGenerator.Create();
+            rng.GetBytes(randomNumber);
+            return Convert.ToBase64String(randomNumber);
         }
     }
 }
